@@ -11,8 +11,8 @@ from himloco_lab.rsl_rl.config import HIMOnPolicyRunnerCfg, HIMPPPOAlgorithmCfg,
 class PPORunnerCfg(HIMOnPolicyRunnerCfg):
     num_steps_per_env = 100
     max_iterations = 15000
-    save_interval = 100
-    experiment_name = "go2_rough"
+    save_interval = 500
+    experiment_name = "g1_rough"
     history_length = 5
     policy = HIMPPOActorCriticCfg(
         actor_hidden_dims = [512, 256, 128],
@@ -35,4 +35,3 @@ class PPORunnerCfg(HIMOnPolicyRunnerCfg):
         desired_kl = 0.01,
         max_grad_norm = 1.0,
     )
-    

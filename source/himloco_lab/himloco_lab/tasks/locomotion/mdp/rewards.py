@@ -375,3 +375,151 @@ def joint_mirror(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, mirror_joint
         )
     reward *= 1 / len(mirror_joints) if len(mirror_joints) > 0 else 0
     return reward
+
+def body_orientation_l2(
+        env: ManagerBasedRLEnv,
+        asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+    ) -> torch.Tensor:
+    asset: Articulation = env.scene[asset_cfg.name]
+    body_orientation = math_utils.quat_apply_inverse(
+        asset.data.body_quat_w[:, asset_cfg.body_ids[0], :], asset.data.GRAVITY_VEC_W
+    )
+    return torch.sum(torch.square(body_orientation[:, :2]), dim=1)
+
+def action_smooth_l2(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """
+    惩罚action的二阶微分
+    权重应为负数
+    """
+
+    return torch.sum(torch.square(env.action_manager.action - 2 * env.action_manager.prev_action + env.action_manager._prev_prev_action), dim=1)
+
+def joint_vel_soft_limits(env: ManagerBasedRLEnv, soft_ratio: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")):
+    """关节速度软限位"""
+    asset: Articulation = env.scene[asset_cfg.name]
+    out_of_limits = (
+        torch.abs(asset.data.joint_vel[:, asset_cfg.joint_ids])
+        - asset.data.joint_vel_limits[:, asset_cfg.joint_ids] * soft_ratio
+    )
+    # 将差距限制在[0-1]避免巨大的惩罚
+    out_of_limits = out_of_limits.clip_(min=0.0, max=1.0)
+    return torch.sum(out_of_limits, dim=1)
+
+def joint_tor_soft_limits(env: ManagerBasedRLEnv, soft_ratio: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")):
+    """关节力矩软限位"""
+    asset: Articulation = env.scene[asset_cfg.name]
+    out_of_limits = (
+        torch.abs(asset.data.computed_torque[:, asset_cfg.joint_ids]) # computed_torque 是被限幅前的力矩
+        - asset.data.joint_effort_limits[:, asset_cfg.joint_ids] * soft_ratio
+    )
+    # 将差距限制在[0-1]避免巨大的惩罚
+    out_of_limits = out_of_limits.clip_(min=0.0, max=1.0)
+    return torch.sum(out_of_limits, dim=1)
+
+def base_height_exp(
+        env: ManagerBasedRLEnv,
+        target_height: float,
+        std: float = 0.1,
+        asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+        sensor_cfg: SceneEntityCfg | None = None,
+    ) -> torch.Tensor:
+    """使用指数核奖励机器人保持目标高度
+    
+    使用exp(-error^2/std^2)核函数，当高度接近目标时奖励接近1，远离目标时奖励接近0
+    
+    Args:
+        env: 环境实例
+        target_height: 目标高度（米）
+        std: 高斯核标准差，控制奖励衰减速度，越小对误差越敏感
+        asset_cfg: 机器人资产配置
+        sensor_cfg: 高度传感器配置（用于地形高度补偿）
+        
+    Returns:
+        奖励值，范围[0, 1]，权重应为正数
+        
+    Note:
+        - 对于平坦地形，target_height是世界坐标系下的绝对高度
+        - 对于复杂地形，会根据sensor读数调整目标高度以适应地形起伏
+    """
+    # 获取机器人
+    asset: RigidObject = env.scene[asset_cfg.name]
+    
+    # 计算调整后的目标高度
+    if sensor_cfg is not None:
+        sensor: RayCaster = env.scene[sensor_cfg.name]
+        # 使用传感器数据调整目标高度
+        terrain_height = torch.clip(torch.mean(sensor.data.ray_hits_w[..., 2], dim=1), -10.0, 10.0)
+        adjusted_target_height = target_height + terrain_height
+    else:
+        # 平坦地形直接使用目标高度
+        adjusted_target_height = target_height
+    
+    # 计算高度误差
+    height_error = asset.data.root_pos_w[:, 2] - adjusted_target_height
+    
+    # 使用指数核计算奖励
+    return torch.exp(-torch.square(height_error) / std**2)
+
+def stand_still_without_cmd_exp(
+    env: ManagerBasedRLEnv, 
+    command_name: str, 
+    std: float = 0.2,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """使用指数核惩罚无命令时的关节位置偏离
+    
+    当速度命令接近0时，惩罚关节位置偏离默认位置的情况。
+    使用exp(-error/std²)核函数，当关节位置接近默认位置时奖励接近1，
+    偏离默认位置时奖励接近0。
+    
+    Args:
+        env: 环境实例
+        command_name: 速度命令名称
+        std: 高斯核标准差，控制奖励对偏差的敏感度（弧度），默认0.2
+        asset_cfg: 资产配置
+        
+    Returns:
+        torch.Tensor: 奖励值，范围[0, 1]，权重应为正数
+    """
+    # extract the used quantities (to enable type-hinting)
+    asset: Articulation = env.scene[asset_cfg.name]
+    # compute position deviation from default
+    diff_angle = asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    # check if command is close to zero (standing still)
+    command = torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=1) < 0.1
+    # apply exponential kernel to position error
+    return (
+        torch.exp(-torch.sum(torch.square(diff_angle), dim=1) / std**2) * command
+    )
+
+def stand_still_without_cmd_vel_exp(
+    env: ManagerBasedRLEnv, 
+    command_name: str, 
+    std: float = 1.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """使用指数核惩罚无命令时的关节速度
+    
+    当速度命令接近0时，惩罚关节速度。
+    使用exp(-error/std²)核函数，当关节速度接近0时奖励接近1，
+    速度较大时奖励接近0。
+    
+    Args:
+        env: 环境实例
+        command_name: 速度命令名称
+        std: 高斯核标准差，控制奖励对速度的敏感度（弧度/秒），默认1.0
+        asset_cfg: 资产配置
+        
+    Returns:
+        torch.Tensor: 奖励值，范围[0, 1]，权重应为正数
+    """
+    # extract the used quantities (to enable type-hinting)
+    asset: Articulation = env.scene[asset_cfg.name]
+    # get joint velocities
+    joint_vel = asset.data.joint_vel[:, asset_cfg.joint_ids]
+    # check if command is close to zero (standing still)
+    command = torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=1) < 0.1
+    # apply exponential kernel to velocity magnitude
+    return (
+        torch.exp(-torch.sum(torch.square(joint_vel), dim=1) / std**2) * command
+    )

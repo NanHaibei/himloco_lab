@@ -33,6 +33,10 @@ cli_args.add_himloco_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
+# args_cli.task = "Unitree-G1-Velocity"
+# args_cli.headless = True
+# args_cli.num_envs = 8
+
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
 

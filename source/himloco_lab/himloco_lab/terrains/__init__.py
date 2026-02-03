@@ -7,4 +7,4 @@
 Custom terrain generation utilities for HIMLOCO.
 """
 
-from .him_terrains_cfg import HfPyramidSlopeWithNoiseCfg, HfDiscreteObstaclesTerrainCfg
+from .him_terrains_cfg import HfPyramidSlopeWithNoiseCfg, HfDiscreteObstaclesTerrainCfg, MeshConcentricMoatsTerrainCfg
